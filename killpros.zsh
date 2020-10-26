@@ -1,6 +1,10 @@
 #$PREFIX/bin/zsh
 # 清除包含指定关键字词的进程。关键词用空格分开可以被分别处理。命令行尾部参数如果是confirm则确认执行，否则仅展示查找的进程结果。
 
+prtsplitline(){
+	print "***************我是长长久久的分割线*****************\n"
+}
+
 killpro4onekey() {
 	targetcontent=$(ps -efww|grep $1|grep -v grep|grep -v $filename|cut -c 9-15,49-)
 	# 用双引号的方式echo，用管道再起线程才能识别字符串中的回车
@@ -35,7 +39,7 @@ killpro4onekey() {
 		}
 	else
 		echo "很遗憾，没有找到包含关键字$1的进程！"
-		print "***************我是长长久久的分割线*****************\n"
+		prtsplitline
 		return
 	fi
 	echo "找到的进程数量为：	$targetlen" 
@@ -58,7 +62,7 @@ killpro4onekey() {
 		}
 		print "………………………………………………\n处理的进程数量为：	$ii" 
 	fi
-	print "***************我是常常的分割线*****************\n"
+	prtsplitline
 }
 
 

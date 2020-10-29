@@ -33,6 +33,11 @@ itemfree="$(date "+%s")\t$(( int($percent) ))\t${swapcontent}\t${swapcontent[-1]
 zmodload -i zsh/mapfile
 # 判断文件是否存在的语句：${+mapfile[$datafile]}
 if !((${+mapfile[$datafile]})); then
+	# 取得文件名字符串中目录部分的语法
+	dirstr=${datafile:h}
+	if [[ ! -d $dirstr ]]; then
+		mkdir $dirstr -p
+	fi
 	print "totalmemo="$(( int($totalmemo) )) > $datafile
 fi
 # if {}的语法格式5.8版本不支持

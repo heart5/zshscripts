@@ -30,6 +30,15 @@ print $(( int($percent) ))
 # 装配待输出的成型字符串，用\t分隔
 itemfree="$(date "+%s")\t$(( int($percent) ))\t${swapcontent}\t${swapcontent[-1]}"
 #print $itemfree
+zmodload -i zsh/mapfile
+# 判断文件是否存在的语句：${+mapfile[$datafile]}
+if !((${+mapfile[$datafile]})); then
+	print "totalmemo="$(( int($totalmemo) )) > $datafile
+fi
+# if {}的语法格式5.8版本不支持
+#if ![[${+mapfile[$datafile]}]] {
+	#print "totalmemo="$totalmemo > $datafile
+#}
 print $itemfree >> $datafile
 
 # 查看首行是否有总内存信息，没有就添加到相应信息到首行

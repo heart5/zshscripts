@@ -10,6 +10,7 @@ killpro4onekey() {
 	targetcontent=$(ps -efww|grep $1|grep -v grep|grep -v $filename|cut -c 9-15,49-)
 	# 用双引号的方式echo，用管道再起线程才能识别字符串中的回车
 	# 声明数组变量
+	#echo ${(t)targetcontent} ${#targetcontent} ${targetcontent[*]}
 	targetconlst=()
 	echo "$targetcontent" | while read i
 	do
@@ -29,12 +30,13 @@ killpro4onekey() {
 		#targetlen=$(($targetlen - 1))
 		targetlen=$((targetlen - 1))
 	fi
+	#echo $targetlen
 	if [ $targetlen -gt 1 ];then
 		print "正在处理的关键字词为：	$1\n"
 		# 声明变量类型，默认是字符串而不是数值
-		integer i=0
+		integer i=1
 		# zsh对包含回车的字符串数组遍历时目前仅发现while语句能有效取出，for百般不行
-		while (($i < $targetlen)){
+		while (($i <= $targetlen)){
 			print ${targetconlst[$i]}
 			i+=1
 		}
@@ -77,7 +79,7 @@ print "$$\t$#\t$*\t$0\t${filename:t}" #提取路径中的文件名称
 confirmed=false
 # 字符串转数组直接用括号括起来，字符串需要是用空格分隔的词
 args=($*)
-print "输入的参数（\$*）“$*”括号()括起来后（args=(\$*)）的类型为：\t${(t)args}，长度为：\t${#args[@]}；print \$args则仅显示第一个参数值：$args，print \${args[@]}才能显示全部参数（${args[@]}）"
+print "输入的参数（\$*）“$*”括号()括起来后（args=(\$*)）的类型为：\t${(t)args}，长度为：\t${#args[@]}；print \$args[1]则仅显示第一个参数值：$args[1]，print \${args[*]}才能显示全部参数（${args[*]}）"
 # 数组变量赋值给其它变量也要显示全部要素并括起来，其实就是重构了一次
 keywords=(${args[@]})
 #print ${keywords[@]}
@@ -90,15 +92,15 @@ if [ $# -eq 0 ];then
 	exit 0
 elif [ $# -gt 0 ];then
 	lastkey=${keywords[-1]} 
-	#print ${(t)lastkey}
-	if [ $lastkey == 'confirm' ];then
+	print ${(t)lastkey} $lastkey
+	if [[ $lastkey == 'confirm' ]];then
 		echo "操作已确认，将被真实执行"
 		# 数组变量赋值蜜汁操作，括号括起来；如果不加括号，默认替换被赋值数组的第一个元素值
 		keywords=(${args[0,-2]})
 		confirmed=true
 	fi
 	# 截取字符串的一部分用[]，从0开始计数
-	print "最后一个参数为：\t${lastkey[0,-1]}"
+	print "最后一个参数为：\t${lastkey[1,-1]}"
 fi
 
 print "\n"

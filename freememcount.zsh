@@ -1,4 +1,4 @@
-#$PREFIX/bin/zsh
+#!/data/data/com.termux/files/usr/bin/zsh
 
 # 记录系统空闲内存信息到文本文件
 # 命令：freememcount.zsh [convert]

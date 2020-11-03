@@ -1,4 +1,4 @@
-#$PREFIX/bin/zsh
+#!/data/data/com.termux/files/usr/bin/zsh
 
 # 清除包含指定关键字词的进程。关键词用空格分开可以被分别处理。命令行尾部参数如果是confirm则确认执行，否则仅展示查找的进程结果。
 
@@ -10,7 +10,13 @@ killpro4onekey() {
 	targetcontent=$(ps -efww|grep $1|grep -v grep|grep -v $filename|cut -c 9-15,49-)
 	# 用双引号的方式echo，用管道再起线程才能识别字符串中的回车
 	# 声明数组变量
-	#echo ${(t)targetcontent} ${#targetcontent} ${targetcontent[*]}
+	#echo ${(t)targetcontent} ${#targetcontent} 
+	#echo ${targetcontent[*]}
+	if [[ ${#targetcontent} == 0 ]];then
+		echo "很遗憾，没有找到包含关键字$1的进程！"
+		prtsplitline
+		return
+	fi
 	targetconlst=()
 	echo "$targetcontent" | while read i
 	do
@@ -22,16 +28,16 @@ killpro4onekey() {
 	# 数组长度默认是1？？？处理之
 	# 数值运算可以用反引号`包括，还需要关键词expr
 	#targetlen=`expr ${#targetconlst[@]} - 1`
-	targetlen=${#targetconlst[@]}
+	targetlen=${#targetconlst}
 
 	# 数值比较可以用双括号
-	if (( $targetlen == 1 )); then
-		# 数值运算也可以用双括号，双括号中变量的$可加可不加
-		#targetlen=$(($targetlen - 1))
-		targetlen=$((targetlen - 1))
-	fi
+	#if (( $targetlen == 1 )); then
+		## 数值运算也可以用双括号，双括号中变量的$可加可不加
+		##targetlen=$(($targetlen - 1))
+		#targetlen=$((targetlen - 1))
+	#fi
 	#echo $targetlen
-	if [ $targetlen -gt 1 ];then
+	if [ $targetlen -gt 0 ];then
 		print "正在处理的关键字词为：	$1\n"
 		# 声明变量类型，默认是字符串而不是数值
 		integer i=1
@@ -40,16 +46,12 @@ killpro4onekey() {
 			print ${targetconlst[$i]}
 			i+=1
 		}
-	else
-		echo "很遗憾，没有找到包含关键字$1的进程！"
-		prtsplitline
-		return
 	fi
 	echo "找到的进程数量为：	$targetlen" 
 
 	if $confirmed;then
-		integer ii=0
-		while (($ii < $targetlen)){
+		integer ii=1
+		while (($ii <= $targetlen)){
 			psinfo="${targetconlst[$ii]}"
 			pid=$(echo "$psinfo" | cut -d ' ' -f 1)
 			#print ${(t)pid}
@@ -63,9 +65,11 @@ killpro4onekey() {
 			print "\x0d\bDone！"
 			ii+=1
 		}
+		ii=ii-1
 		print "………………………………………………\n处理的进程数量为：	$ii" 
 	fi
 	prtsplitline
+
 }
 
 

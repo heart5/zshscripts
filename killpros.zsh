@@ -83,7 +83,7 @@ print "$$\t$#\t$*\t$0\t${filename:t}" #提取路径中的文件名称
 confirmed=false
 # 字符串转数组直接用括号括起来，字符串需要是用空格分隔的词
 args=($*)
-print "输入的参数（\$*）“$*”括号()括起来后（args=(\$*)）的类型为：\t${(t)args}，长度为：\t${#args[@]}；print \$args[1]则仅显示第一个参数值：$args[1]，print \${args[*]}才能显示全部参数（${args[*]}）"
+print "输入的参数（\$*）“$*”括号()括起来后（args=(\$*)）的类型为：\t${(t)args}，长度为：\t${#args[@]}；\$args显示参数值：$args，\${args[*]}也显示全部参数（${args[*]}），\${args[1]}显示第一个参数值${args[1]}"
 # 数组变量赋值给其它变量也要显示全部要素并括起来，其实就是重构了一次
 keywords=(${args[@]})
 #print ${keywords[@]}
@@ -96,7 +96,7 @@ if [ $# -eq 0 ];then
 	exit 0
 elif [ $# -gt 0 ];then
 	lastkey=${keywords[-1]} 
-	print ${(t)lastkey} $lastkey
+	#print ${(t)lastkey} $lastkey
 	if [[ $lastkey == 'confirm' ]];then
 		echo "操作已确认，将被真实执行"
 		# 数组变量赋值蜜汁操作，括号括起来；如果不加括号，默认替换被赋值数组的第一个元素值

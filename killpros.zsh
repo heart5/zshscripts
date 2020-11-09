@@ -60,7 +60,8 @@ killpro4onekey() {
 			fi
 			print "*****&&&*****"
 			echo $psinfo
-			echo "清除id为$pid的进程……"
+			# print语句双引号中变量名必须用花括号{}括起来
+			print "清除id为${pid}的进程……"
 			kill -9 $pid
 			print "\x0d\bDone！"
 			ii+=1
@@ -83,7 +84,7 @@ print "$$\t$#\t$*\t$0\t${filename:t}" #提取路径中的文件名称
 confirmed=false
 # 字符串转数组直接用括号括起来，字符串需要是用空格分隔的词
 args=($*)
-print "输入的参数（\$*）“$*”括号()括起来后（args=(\$*)）的类型为：\t${(t)args}，长度为：\t${#args[@]}；\$args显示参数值：$args，\${args[*]}也显示全部参数（${args[*]}），\${args[1]}显示第一个参数值${args[1]}"
+print "输入的参数（\$*）值为：\t“$*”，括号()括起来后args=(\$*)的类型为：\t${(t)args}，长度为：\t${#args[@]}；\$args显示参数值：$args，\${args[*]}也显示全部参数（${args[*]}），\${args[1]}显示第一个参数值${args[1]}"
 # 数组变量赋值给其它变量也要显示全部要素并括起来，其实就是重构了一次
 keywords=(${args[@]})
 #print ${keywords[@]}

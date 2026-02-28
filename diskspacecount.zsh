@@ -1,8 +1,16 @@
-#!/bin/zsh
+#!/usr/bin/zsh
+#!/data/data/com.termux/files/usr/bin/zsh
 
 # 可配置的磁盘空间监控脚本
 # 用法: ./diskspacecount.zsh [挂载点:名称] [挂载点:名称] ...
 # 示例: ./diskspacecount.zsh /:root /data:data /storage/emulated:termux_storage
+
+# 检测是否在 Termux 环境中运行
+if [[ -n "$TERMUX_VERSION" ]] || [[ -d "/data/data/com.termux/files/usr" ]]; then
+    IS_TERMUX=true
+else
+    IS_TERMUX=false
+fi
 
 # 设置数据目录
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -66,16 +74,26 @@ parse_arguments() {
 validate_mountpoint() {
     local mountpoint="$1"
     
-    # 检查挂载点是否存在
+    # 检查路径是否存在（基础检查）
     if [[ ! -e "$mountpoint" ]]; then
-        echo "[$TIMESTAMP] 警告: 挂载点 $mountpoint 不存在" >&2
+        echo "[$TIMESTAMP] 警告: 路径 $mountpoint 不存在" >&2
         return 1
     fi
     
-    # 检查是否已挂载
-    if ! mountpoint -q "$mountpoint" 2>/dev/null; then
-        echo "[$TIMESTAMP] 警告: $mountpoint 未挂载或不是挂载点" >&2
-        return 1
+    # Termux 环境：使用 df 命令验证路径可访问性
+    if [[ "$IS_TERMUX" == true ]]; then
+        if df "$mountpoint" >/dev/null 2>&1; then
+            return 0
+        else
+            echo "[$TIMESTAMP] 警告: （termux环境）无法通过 df 访问 $mountpoint，可能无权限或路径无效" >&2
+            return 1
+        fi
+    else
+        # 标准 Linux 环境：使用 mountpoint 命令验证
+        if ! mountpoint -q "$mountpoint" 2>/dev/null; then
+            echo "[$TIMESTAMP] 警告: $mountpoint 未挂载或不是挂载点" >&2
+            return 1
+        fi
     fi
     
     return 0

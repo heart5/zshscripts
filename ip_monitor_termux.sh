@@ -7,8 +7,21 @@ DATA_DIR="$SCRIPT_DIR/data"
 # 创建data目录（如果不存在）
 mkdir -p "$DATA_DIR"
 
-LOG_FILE="$DATA_DIR/ip_changes.txt"
+LOG_FILE="$DATA_DIR/ip_changes.log"
 TEMP_FILE="$DATA_DIR/ip_changes.tmp"
+LOCK_FILE="$DATA_DIR/ip_monitor.lock"
+
+# 清理字段中的特殊字符
+clean_field() {
+    local field="$1"
+    # 移除换行符、回车符
+    field=$(echo "$field" | tr -d '\n\r')
+    # 替换竖线为横线（避免破坏日志格式）
+    field=$(echo "$field" | sed 's/|/-/g')
+    # 替换冒号为空格+冒号（提高可读性）
+    field=$(echo "$field" | sed 's/:/ :/g')
+    echo "$field"
+}
 
 # 检查并安装必要的工具
 check_dependencies() {
@@ -43,12 +56,17 @@ get_network_info() {
         if [ -z "$wifi_name" ]; then
             wifi_name=$(echo "$wifi_info" | jq -r '.ssid' 2>/dev/null || echo "Unknown_WiFi")
         fi
-        # 简化WiFi名称，移除可能的问题字符
-        wifi_name=$(echo "$wifi_name" | tr -d '\n\r' | sed 's/|/-/g' | sed 's/:/ -/g')
+        # 如果WiFi名称为空或null，使用Unknown_WiFi
+        if [ -z "$wifi_name" ] || [ "$wifi_name" = "null" ] || [ "$wifi_name" = "<unknown ssid>" ]; then
+            wifi_name="Unknown_WiFi"
+        fi
     else
         network_type="Mobile"
         wifi_name="N/A"
     fi
+
+    # 清理WiFi名称
+    wifi_name=$(clean_field "$wifi_name")
 
     echo "$network_type|$wifi_name"
 }
@@ -67,7 +85,7 @@ get_public_ip() {
     echo "${ip:-Unknown}"
 }
 
-# 使用ifconfig获取局域网IP（优化版）
+# 使用ifconfig获取局域网IP（修复版）
 get_local_ip() {
     local network_type="$1"
     local ip=""
@@ -93,22 +111,24 @@ get_local_ip() {
 
         # 方法3：如果还没有找到，尝试查找其他可能的WiFi接口
         if [ -z "$ip" ]; then
-            # 查找包含"inet"且不是回环地址的接口
-            echo "$ifconfig_output" | while read -r line; do
-                if echo "$line" | grep -q '^[a-z]'; then
-                    current_iface=$(echo "$line" | cut -d: -f1)
-                fi
-                if echo "$line" | grep -q 'inet ' && [ "$current_iface" != "lo" ]; then
-                    ip=$(echo "$line" | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
-                    if [ -n "$ip" ] && [ "$ip" != "127.0.0.1" ]; then
-                        # 检查是否为私有IP（WiFi通常是私有IP）
-                        if echo "$ip" | grep -q '^192\.168\.' || echo "$ip" | grep -q '^10\.' || echo "$ip" | grep -q '^172\.'; then
-                            echo "$ip"
-                            return
+            ip=$(echo "$ifconfig_output" | (
+                while read -r line; do
+                    if echo "$line" | grep -q '^[a-z]'; then
+                        current_iface=$(echo "$line" | cut -d: -f1)
+                    fi
+                    if echo "$line" | grep -q 'inet ' && [ "$current_iface" != "lo" ]; then
+                        temp_ip=$(echo "$line" | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+                        if [ -n "$temp_ip" ] && [ "$temp_ip" != "127.0.0.1" ]; then
+                            # 检查是否为私有IP（WiFi通常是私有IP）
+                            if echo "$temp_ip" | grep -q '^192\.168\.' || echo "$temp_ip" | grep -q '^10\.' || echo "$temp_ip" | grep -q '^172\.'; then
+                                echo "$temp_ip"
+                                exit 0
+                            fi
                         fi
                     fi
-                fi
-            done | head -1
+                done
+                echo "N/A"
+            ))
         fi
     else
         # 移动数据：从ifconfig输出中查找移动数据接口IP
@@ -122,25 +142,34 @@ get_local_ip() {
 
         # 如果还没有找到，尝试其他可能的移动数据接口
         if [ -z "$ip" ]; then
-            # 查找包含"inet"且不是回环地址、WiFi地址的接口
-            echo "$ifconfig_output" | while read -r line; do
-                if echo "$line" | grep -q '^[a-z]'; then
-                    current_iface=$(echo "$line" | cut -d: -f1)
-                fi
-                if echo "$line" | grep -q 'inet ' && [ "$current_iface" != "lo" ] && [ "$current_iface" != "wlan"* ]; then
-                    ip=$(echo "$line" | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
-                    if [ -n "$ip" ] && [ "$ip" != "127.0.0.1" ]; then
-                        # 移动数据IP通常是10.x.x.x或运营商分配的IP
-                        echo "$ip"
-                        return
+            ip=$(echo "$ifconfig_output" | (
+                while read -r line; do
+                    if echo "$line" | grep -q '^[a-z]'; then
+                        current_iface=$(echo "$line" | cut -d: -f1)
                     fi
-                fi
-            done | head -1
+                    if echo "$line" | grep -q 'inet ' && [ "$current_iface" != "lo" ] && [[ "$current_iface" != wlan* ]]; then
+                        temp_ip=$(echo "$line" | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+                        if [ -n "$temp_ip" ] && [ "$temp_ip" != "127.0.0.1" ]; then
+                            # 移动数据IP通常是10.x.x.x或运营商分配的IP
+                            echo "$temp_ip"
+                            exit 0
+                        fi
+                    fi
+                done
+                echo "N/A"
+            ))
         fi
     fi
 
-    # 如果所有方法都失败，返回N/A
-    echo "${ip:-N/A}"
+    # 清理IP地址，移除可能的换行符
+    ip=$(echo "$ip" | tr -d '\n\r')
+
+    # 如果IP为空，返回N/A
+    if [ -z "$ip" ]; then
+        echo "N/A"
+    else
+        echo "$ip"
+    fi
 }
 
 # 获取VPN接口信息
@@ -274,22 +303,41 @@ has_changed() {
     fi
 }
 
-# 获取网络接口详细信息（调试用）
-get_interface_details() {
-    echo "=== 网络接口详细信息 ==="
-    ifconfig 2>/dev/null | grep -E '^[a-z]|inet ' | while read -r line; do
-        if echo "$line" | grep -q '^[a-z]'; then
-            echo ""
-            echo "$line"
-        else
-            echo "  $line"
+# 防止多实例运行
+acquire_lock() {
+    # 尝试获取锁，如果失败则退出
+    if [ -e "$LOCK_FILE" ]; then
+        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+        if [ -n "$lock_pid" ] && ps -p "$lock_pid" > /dev/null 2>&1; then
+            echo "脚本已在运行中 (PID: $lock_pid)，跳过本次执行"
+            exit 0
         fi
-    done
-    echo "========================"
+    fi
+    echo $$ > "$LOCK_FILE"
+}
+
+# 释放锁
+release_lock() {
+    rm -f "$LOCK_FILE" 2>/dev/null
+}
+
+# 设置超时处理
+timeout_handler() {
+    echo "脚本执行超时，强制退出"
+    release_lock
+    exit 1
 }
 
 # 主函数
 main() {
+    # 设置超时（30秒）
+    trap timeout_handler ALRM
+    (sleep 30; kill -ALRM $$) &
+    timeout_pid=$!
+
+    # 获取锁
+    acquire_lock
+
     # 检查依赖
     check_dependencies
 
@@ -309,21 +357,24 @@ main() {
     VPN_INTERFACE=$(echo "$vpn_info" | cut -d'|' -f1)
     VPN_IP=$(echo "$vpn_info" | cut -d'|' -f2)
 
-    # 调试信息（可选）
-    if [ "$1" = "--debug" ]; then
-        get_interface_details
-        echo "当前网络类型: $NETWORK_TYPE"
-        echo "当前WiFi名称: $WIFI_NAME"
-        echo "当前公网IP: $PUBLIC_IP"
-        echo "当前局域网IP: $LOCAL_IP"
-        echo "当前VPN接口: $VPN_INTERFACE"
-        echo "当前VPN IP: $VPN_IP"
-    fi
+    # 清理所有字段
+    WIFI_NAME=$(clean_field "$WIFI_NAME")
+    PUBLIC_IP=$(clean_field "$PUBLIC_IP")
+    LOCAL_IP=$(clean_field "$LOCAL_IP")
+    VPN_INTERFACE=$(clean_field "$VPN_INTERFACE")
+    VPN_IP=$(clean_field "$VPN_IP")
 
     # 检查是否有变化
     if has_changed "$NETWORK_TYPE" "$WIFI_NAME" "$PUBLIC_IP" "$LOCAL_IP" "$VPN_INTERFACE" "$VPN_IP"; then
-        # 生成新记录
-        NEW_RECORD="$(date '+%Y-%m-%d %H:%M:%S') | Network: $NETWORK_TYPE | WiFi_Name: $WIFI_NAME | Public_IP: $PUBLIC_IP | Local_IP: $LOCAL_IP | VPN_Interface: $VPN_INTERFACE | VPN_IP: $VPN_IP"
+        # 生成新记录 - 使用printf确保格式一致
+        NEW_RECORD=$(printf "%s | Network: %s | WiFi_Name: %s | Public_IP: %s | Local_IP: %s | VPN_Interface: %s | VPN_IP: %s" \
+            "$(date '+%Y-%m-%d %H:%M:%S')" \
+            "$NETWORK_TYPE" \
+            "$WIFI_NAME" \
+            "$PUBLIC_IP" \
+            "$LOCAL_IP" \
+            "$VPN_INTERFACE" \
+            "$VPN_IP")
 
         echo "检测到网络/IP变化，记录新信息:"
         echo "$NEW_RECORD"
@@ -339,19 +390,25 @@ main() {
             echo "$NEW_RECORD" > "$LOG_FILE"
         fi
 
-        # 可选：限制日志文件大小（保留最近1000条记录）
+        # 可选：限制日志文件大小（保留最近100000条记录）
         if [ -f "$LOG_FILE" ]; then
-            head -n 1000 "$LOG_FILE" > "$TEMP_FILE" 2>/dev/null && mv "$TEMP_FILE" "$LOG_FILE"
+            head -n 100000 "$LOG_FILE" > "$TEMP_FILE" 2>/dev/null && mv "$TEMP_FILE" "$LOG_FILE"
         fi
     else
         echo "网络/IP未发生变化，跳过记录"
         echo "当前: Network: $NETWORK_TYPE, WiFi: $WIFI_NAME, Public_IP: $PUBLIC_IP, Local_IP: $LOCAL_IP, VPN: $VPN_INTERFACE ($VPN_IP)"
     fi
+
+    # 清理超时进程
+    kill -9 "$timeout_pid" 2>/dev/null || true
+
+    # 释放锁
+    release_lock
 }
 
 # 执行主函数
 if [ "$1" = "--debug" ]; then
-    main "--debug"
+    main "--debug"                                 
 else
-    main
+    main                                          
 fi

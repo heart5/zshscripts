@@ -19,26 +19,75 @@ clean_field() {
     echo "$1" | tr -d '\n\r\t' | sed 's/|/_/g' | head -c 100
 }
 
-# 检查是否已有实例在运行（替代锁机制）
+# 简化进程检查 - 更可靠的方法
 check_running_instance() {
     local script_name=$(basename "$0")
+    local script_path=$(realpath "$0")
     local current_pid=$$
     
-    # 查找同名脚本进程（排除当前进程）
-    local running_pids=$(ps -o pid,cmd | grep -E "bash.*$script_name" | grep -v "grep" | grep -v " $current_pid " | awk '{print $1}')
+    # 方法1：使用pgrep（如果可用）
+    if command -v pgrep >/dev/null 2>&1; then
+        # 安装pgrep（如果不存在）
+        if ! pkg list-installed | grep -q procps; then
+            pkg install procps -y >/dev/null 2>&1
+        fi
+        
+        # 查找同名脚本进程（排除当前进程）
+        local running_count=$(pgrep -f "$script_name" | grep -v "^$current_pid$" | wc -l)
+        if [ "$running_count" -gt 0 ]; then
+            echo "检测到已有实例在运行，退出当前进程"
+            return 1
+        fi
+        return 0
+    fi
     
-    if [ -n "$running_pids" ]; then
-        # 检查这些进程是否真的在运行（不是僵尸进程）
-        for pid in $running_pids; do
-            if [ -d "/proc/$pid" ]; then
-                local elapsed_time=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-                if [ -n "$elapsed_time" ] && [ "$elapsed_time" -lt 300 ]; then  # 5分钟内启动的进程
-                    echo "检测到已有实例在运行(PID: $pid, 已运行: ${elapsed_time}s)，退出当前进程"
-                    return 1
+    # 方法2：使用ps的简化版本（避免复杂grep）
+    # 获取所有bash进程，排除当前进程
+    local other_instances=$(ps -o pid,comm,args 2>/dev/null | grep -E "bash.*$script_name" | grep -v "grep" | grep -v " $current_pid ")
+    
+    if [ -n "$other_instances" ]; then
+        # 进一步过滤：只检查运行时间小于60秒的进程
+        for pid in $(echo "$other_instances" | awk '{print $1}'); do
+            if [ "$pid" != "$current_pid" ] && [ -n "$pid" ]; then
+                # 检查进程是否存在
+                if ps -p "$pid" >/dev/null 2>&1; then
+                    local cmdline=$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ')
+                    # 确认确实是同一个脚本
+                    if echo "$cmdline" | grep -q "$script_name"; then
+                        echo "检测到已有实例在运行(PID: $pid)，退出当前进程"
+                        return 1
+                    fi
                 fi
             fi
         done
     fi
+    
+    return 0
+}
+
+# 替代方案：使用简单的锁文件（更可靠）
+check_running_instance_simple() {
+    local lock_file="$DATA_DIR/ip_monitor.lock"
+    local lock_timeout=60  # 锁超时时间（秒）
+    
+    # 如果锁文件存在且未超时
+    if [ -f "$lock_file" ]; then
+        local lock_pid=$(cat "$lock_file" 2>/dev/null)
+        local lock_time=$(stat -c %Y "$lock_file" 2>/dev/null || echo 0)
+        local current_time=$(date +%s)
+        
+        # 检查锁是否超时
+        if [ $((current_time - lock_time)) -lt "$lock_timeout" ]; then
+            # 检查锁中的PID是否仍在运行
+            if [ -n "$lock_pid" ] && ps -p "$lock_pid" >/dev/null 2>&1; then
+                echo "检测到已有实例在运行(PID: $lock_pid)，退出当前进程"
+                return 1
+            fi
+        fi
+    fi
+    
+    # 创建新锁
+    echo $$ > "$lock_file"
     return 0
 }
 
@@ -115,14 +164,8 @@ get_vpn_info() {
     local vpn_interface="N/A"
     local vpn_ip="N/A"
     
-    # 使用ip命令检测tun接口
-    if command -v ip >/dev/null 2>&1; then
-        vpn_interface=$(ip link show 2>/dev/null | grep -o 'tun[0-9]*:' | cut -d':' -f1 | head -1)
-        if [ -n "$vpn_interface" ]; then
-            vpn_ip=$(ip -o -4 addr show dev "$vpn_interface" 2>/dev/null | awk '{print $4}' | cut -d'/' -f1)
-        fi
-    # 回退到ifconfig
-    elif command -v ifconfig >/dev/null 2>&1; then
+    # 使用ifconfig检测tun接口
+    if command -v ifconfig >/dev/null 2>&1; then
         vpn_interface=$(ifconfig 2>/dev/null | grep -o '^tun[0-9]*' | head -1)
         if [ -n "$vpn_interface" ]; then
             vpn_ip=$(ifconfig "$vpn_interface" 2>/dev/null | grep 'inet ' | awk '{print $2}')
@@ -209,16 +252,33 @@ timeout_handler() {
     exit 1
 }
 
+# 清理函数
+cleanup() {
+    # 清理锁文件（如果使用锁文件方案）
+    local lock_file="$DATA_DIR/ip_monitor.lock"
+    if [ -f "$lock_file" ]; then
+        local lock_pid=$(cat "$lock_file" 2>/dev/null)
+        if [ "$lock_pid" = "$$" ]; then
+            rm -f "$lock_file" 2>/dev/null
+        fi
+    fi
+    
+    # 清理超时进程
+    [ -n "$timeout_pid" ] && kill -9 "$timeout_pid" 2>/dev/null || true
+}
+
 # 主函数
 main() {
+    # 设置清理陷阱
+    trap cleanup EXIT
+    
     # 设置超时
     trap timeout_handler ALRM
     (sleep "$MAX_RUNTIME_SECONDS"; kill -ALRM $$) &
-    local timeout_pid=$!
+    timeout_pid=$!
     
-    # 检查是否有其他实例在运行
-    if ! check_running_instance; then
-        kill -9 "$timeout_pid" 2>/dev/null
+    # 检查是否有其他实例在运行（使用锁文件方案，更可靠）
+    if ! check_running_instance_simple; then
         exit 0
     fi
     
@@ -257,14 +317,13 @@ main() {
         echo "网络/IP未发生变化，跳过记录"
         echo "当前: Network: $network_type, WiFi: $wifi_name, Public_IP: $public_ip, Local_IP: $local_ip, VPN: $vpn_interface ($vpn_ip)"
     fi
-    
-    # 清理超时进程
-    kill -9 "$timeout_pid" 2>/dev/null || true
 }
 
 # 启动脚本
 if [ "$1" = "--debug" ]; then
     echo "调试模式启动..."
+    echo "当前PID: $$"
+    echo "脚本路径: $(realpath "$0")"
     main
 else
     # 静默运行（适合定时任务）

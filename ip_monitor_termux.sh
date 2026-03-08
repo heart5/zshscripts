@@ -10,9 +10,9 @@ LOG_FILE="$DATA_DIR/ip_changes.log"
 TEMP_FILE="$DATA_DIR/ip_changes.tmp"
 
 # 配置参数 - 可根据不同手机性能调整
-MAX_RUNTIME_SECONDS=15     # 最大运行时间（秒）
-MAX_LOG_LINES=5000         # 最大日志行数（减少内存占用）
-CHECK_INTERVAL_MINUTES=7   # 检查间隔（分钟）
+MAX_RUNTIME_SECONDS=8     # 最大运行时间（秒）
+MAX_LOG_LINES=9000         # 最大日志行数（减少内存占用）
+# CHECK_INTERVAL_MINUTES=7   # 检查间隔（分钟）
 
 # 清理字段中的特殊字符（简化版）
 clean_field() {

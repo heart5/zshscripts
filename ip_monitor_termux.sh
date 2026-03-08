@@ -91,7 +91,7 @@ check_running_instance_simple() {
     return 0
 }
 
-# 简化网络检测 - 使用最可靠的方法
+# 简化网络检测 - 修复WiFi名称提取
 get_network_info() {
     local network_type="Mobile"
     local wifi_name="N/A"
@@ -99,12 +99,21 @@ get_network_info() {
     # 尝试获取WiFi信息（使用termux-wifi-connectioninfo）
     if command -v termux-wifi-connectioninfo >/dev/null 2>&1; then
         local wifi_info=$(termux-wifi-connectioninfo 2>/dev/null)
+        # 修复：使用更可靠的JSON解析方法
         if echo "$wifi_info" | grep -q '"ssid"'; then
             network_type="WiFi"
-            # 简化WiFi名称提取
-            wifi_name=$(echo "$wifi_info" | grep -o '"ssid":"[^"]*"' | cut -d'"' -f4)
-            [ -z "$wifi_name" ] && wifi_name="Unknown_WiFi"
-            [ "$wifi_name" = "null" ] && wifi_name="Unknown_WiFi"
+            # 方法1：使用jq（如果已安装）
+            if command -v jq >/dev/null 2>&1; then
+                wifi_name=$(echo "$wifi_info" | jq -r '.ssid' 2>/dev/null)
+            else
+                # 方法2：使用sed提取（更可靠）
+                wifi_name=$(echo "$wifi_info" | sed -n 's/.*"ssid": *"\([^"]*\)".*/\1/p')
+            fi
+            
+            # 如果提取失败或为空，使用备用方法
+            if [ -z "$wifi_name" ] || [ "$wifi_name" = "null" ]; then
+                wifi_name="Unknown_WiFi"
+            fi
         fi
     fi
     
@@ -143,11 +152,11 @@ get_local_ip() {
         local ifconfig_output=$(ifconfig 2>/dev/null)
         
         if [ "$network_type" = "WiFi" ]; then
-            # 查找wlan接口
-            ip=$(echo "$ifconfig_output" | grep -A1 'wlan' | grep 'inet ' | awk '{print $2}' | head -1)
+            # 查找wlan接口 - 修复：更精确的匹配
+            ip=$(echo "$ifconfig_output" | grep -A2 '^wlan' | grep 'inet ' | awk '{print $2}' | head -1)
         else
             # 查找移动网络接口
-            ip=$(echo "$ifconfig_output" | grep -A1 'rmnet\|ccmni' | grep 'inet ' | awk '{print $2}' | head -1)
+            ip=$(echo "$ifconfig_output" | grep -A2 '^rmnet\|^ccmni' | grep 'inet ' | awk '{print $2}' | head -1)
         fi
     fi
     
@@ -159,20 +168,48 @@ get_local_ip() {
     fi
 }
 
-# 获取VPN信息 - 简化版
+# 获取VPN信息 - 修复版
 get_vpn_info() {
     local vpn_interface="N/A"
     local vpn_ip="N/A"
     
-    # 使用ifconfig检测tun接口
-    if command -v ifconfig >/dev/null 2>&1; then
-        vpn_interface=$(ifconfig 2>/dev/null | grep -o '^tun[0-9]*' | head -1)
-        if [ -n "$vpn_interface" ]; then
-            vpn_ip=$(ifconfig "$vpn_interface" 2>/dev/null | grep 'inet ' | awk '{print $2}')
+    # 获取完整的ifconfig输出
+    local ifconfig_output=$(ifconfig 2>/dev/null)
+    
+    # 查找VPN接口（tun, tap, ppp等）
+    # 先查找接口名
+    vpn_interface=$(echo "$ifconfig_output" | grep -o '^tun[0-9]*:' | cut -d':' -f1 | head -1)
+    
+    # 如果没有找到tun接口，尝试其他VPN接口
+    if [ -z "$vpn_interface" ]; then
+        vpn_interface=$(echo "$ifconfig_output" | grep -o '^tap[0-9]*:' | cut -d':' -f1 | head -1)
+    fi
+    
+    if [ -z "$vpn_interface" ]; then
+        vpn_interface=$(echo "$ifconfig_output" | grep -o '^ppp[0-9]*:' | cut -d':' -f1 | head -1)
+    fi
+    
+    # 如果找到了VPN接口，提取IP地址
+    if [ -n "$vpn_interface" ]; then
+        # 方法1：使用sed提取该接口的IP
+        vpn_ip=$(echo "$ifconfig_output" | sed -n "/^$vpn_interface:/,/^[a-z]/p" | grep 'inet ' | awk '{print $2}' | head -1)
+        
+        # 方法2：如果方法1失败，尝试备用方法
+        if [ -z "$vpn_ip" ] || [ "$vpn_ip" = "127.0.0.1" ]; then
+            vpn_ip=$(echo "$ifconfig_output" | grep -A5 "^$vpn_interface:" | grep 'inet ' | awk '{print $2}' | head -1)
+        fi
+        
+        # 方法3：最后尝试使用正则表达式直接匹配
+        if [ -z "$vpn_ip" ] || [ "$vpn_ip" = "127.0.0.1" ]; then
+            vpn_ip=$(echo "$ifconfig_output" | grep -A2 "^$vpn_interface:" | grep -o 'inet [0-9.]*' | awk '{print $2}' | head -1)
         fi
     fi
     
-    echo "${vpn_interface:-N/A}|${vpn_ip:-N/A}"
+    # 清理输出
+    [ -z "$vpn_ip" ] && vpn_ip="N/A"
+    [ -z "$vpn_interface" ] && vpn_interface="N/A"
+    
+    echo "$vpn_interface|$vpn_ip"
 }
 
 # 检查是否有变化 - 优化IO操作

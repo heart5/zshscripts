@@ -106,10 +106,10 @@ get_network_info() {
             # 方法1：使用jq（如果已安装）
             if command -v jq >/dev/null 2>&1; then
                 wifi_name=$(echo "$wifi_info" | jq -r '.ssid' 2>/dev/null)
-            elif
+            elif command -v sed >/dev/null 2>&1; then
                 # 方法2：使用sed提取（更可靠）
                 wifi_name=$(echo "$wifi_info" | sed -n 's/.*"ssid": *"\([^"]*\)".*/\1/p')
-            else:
+            else
                 # 方法3：使用grep提取
                 wifi_name=$(echo "$wifi_info" | grep -o '"ssid":"[^"]*"' | cut -d'"' -f4)
             fi

@@ -91,10 +91,37 @@ check_running_instance_simple() {
     return 0
 }
 
-# 简化网络检测 - 使用最可靠的方法
+# 检测是否开启了热点
+is_hotspot_active() {
+    # 检查是否有热点相关的接口
+    if command -v ifconfig >/dev/null 2>&1; then
+        local ifconfig_output=$(ifconfig 2>/dev/null)
+
+        # 检查p2p-p2p0-0接口（热点接口）
+        if echo "$ifconfig_output" | grep -q '^p2p-p2p0-0:'; then
+            return 0  # 热点活跃
+        fi
+
+        # 检查wlan0是否有热点IP（192.168.43.1）
+        local wlan0_ip=$(echo "$ifconfig_output" | grep -A2 '^wlan0:' | grep 'inet ' | awk '{print $2}' | head -1)
+        if echo "$wlan0_ip" | grep -q '^192\.168\.43\.1$'; then
+            return 0  # 热点活跃
+        fi
+    fi
+
+    return 1  # 热点不活跃
+}
+
+# 简化网络检测 - 增强版，支持热点检测
 get_network_info() {
     local network_type="Mobile"
     local wifi_name="N/A"
+
+    # 首先检查是否开启了热点
+    if is_hotspot_active; then
+        # 如果有热点，标记为热点模式
+        wifi_name="Hotspot_Mode"
+    fi
 
     # 尝试获取WiFi信息（使用termux-wifi-connectioninfo）
     if command -v termux-wifi-connectioninfo >/dev/null 2>&1; then
@@ -103,33 +130,42 @@ get_network_info() {
         # 检查是否有有效的ssid字段
         if echo "$wifi_info" | grep -q '"ssid"'; then
             # 提取ssid值
-            # 方法1：使用jq（如果已安装）
-            if command -v jq >/dev/null 2>&1; then
-                wifi_name=$(echo "$wifi_info" | jq -r '.ssid' 2>/dev/null)
-            elif command -v sed >/dev/null 2>&1; then
-                # 方法2：使用sed提取（更可靠）
-                wifi_name=$(echo "$wifi_info" | sed -n 's/.*"ssid": *"\([^"]*\)".*/\1/p')
-            else
-                # 方法3：使用grep提取
-                wifi_name=$(echo "$wifi_info" | grep -o '"ssid":"[^"]*"' | cut -d'"' -f4)
-            fi
+            wifi_name=$(echo "$wifi_info" | grep -o '"ssid":"[^"]*"' | cut -d'"' -f4)
 
             # 判断是否为有效的WiFi连接
             if [ "$wifi_name" != "<unknown ssid>" ] && [ "$wifi_name" != "null" ] && [ -n "$wifi_name" ]; then
                 # 有效的WiFi连接
                 network_type="WiFi"
             else
-                # 非WiFi连接状态，统一显示为Unknown_WiFi
-                wifi_name="Unknown_WiFi"
-                network_type="Mobile"
+                # 非WiFi连接状态
+                if [ "$wifi_name" = "Hotspot_Mode" ]; then
+                    # 热点模式
+                    network_type="Hotspot"
+                else
+                    # 普通移动网络
+                    wifi_name="Unknown_WiFi"
+                    network_type="Mobile"
+                fi
             fi
         else
-            # 没有ssid字段，非WiFi连接状态，统一显示为Unknown_WiFi
-            wifi_name="Unknown_WiFi"
+            # 没有ssid字段
+            if [ "$wifi_name" = "Hotspot_Mode" ]; then
+                # 热点模式
+                network_type="Hotspot"
+            else
+                # 普通移动网络
+                wifi_name="Unknown_WiFi"
+            fi
         fi
     else
-        # 命令不可用，统一显示为Unknown_WiFi
-        wifi_name="Unknown_WiFi"
+        # 命令不可用
+        if [ "$wifi_name" = "Hotspot_Mode" ]; then
+            # 热点模式
+            network_type="Hotspot"
+        else
+            # 普通移动网络
+            wifi_name="Unknown_WiFi"
+        fi
     fi
 
     # 清理WiFi名称（确保统一格式）
@@ -157,7 +193,7 @@ get_public_ip() {
     fi
 }
 
-# 获取本地IP - 简化版
+# 获取本地IP - 增强版，支持热点检测
 get_local_ip() {
     local network_type="$1"
     local ip="N/A"
@@ -167,11 +203,38 @@ get_local_ip() {
         local ifconfig_output=$(ifconfig 2>/dev/null)
 
         if [ "$network_type" = "WiFi" ]; then
-            # 查找wlan接口 - 修复：更精确的匹配
-            ip=$(echo "$ifconfig_output" | grep -A2 '^wlan' | grep 'inet ' | awk '{print $2}' | head -1)
+            # 查找wlan接口 - 优先获取外部WiFi的IP
+            # 先检查wlan0是否有非热点IP（不是192.168.43.x）
+            ip=$(echo "$ifconfig_output" | grep -A2 '^wlan0:' | grep 'inet ' | awk '{print $2}' | head -1)
+
+            # 如果wlan0的IP是热点IP（192.168.43.x），则不是真正的WiFi连接
+            if echo "$ip" | grep -q '^192\.168\.43\.'; then
+                # 这是热点IP，不是外部WiFi连接
+                ip="N/A"
+            fi
+
+            # 如果wlan0没有有效IP，检查其他wlan接口
+            if [ -z "$ip" ] || [ "$ip" = "N/A" ]; then
+                ip=$(echo "$ifconfig_output" | grep -A2 '^wlan' | grep 'inet ' | awk '{print $2}' | head -1)
+            fi
         else
-            # 查找移动网络接口
+            # Mobile网络：查找移动网络接口
             ip=$(echo "$ifconfig_output" | grep -A2 '^rmnet\|^ccmni' | grep 'inet ' | awk '{print $2}' | head -1)
+
+            # 如果没有找到移动网络IP，检查是否有热点IP
+            if [ -z "$ip" ] || [ "$ip" = "N/A" ]; then
+                # 检查是否有热点接口（p2p-p2p0-0或wlan0的热点IP）
+                local hotspot_ip=$(echo "$ifconfig_output" | grep -A2 '^p2p-p2p0-0:' | grep 'inet ' | awk '{print $2}' | head -1)
+                if [ -n "$hotspot_ip" ]; then
+                    ip="$hotspot_ip"
+                else
+                    # 检查wlan0是否有热点IP
+                    hotspot_ip=$(echo "$ifconfig_output" | grep -A2 '^wlan0:' | grep 'inet ' | awk '{print $2}' | head -1)
+                    if echo "$hotspot_ip" | grep -q '^192\.168\.43\.'; then
+                        ip="$hotspot_ip"
+                    fi
+                fi
+            fi
         fi
     fi
 

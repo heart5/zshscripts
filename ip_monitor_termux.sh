@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
-# 优化版IP监控脚本 - 全局缓存机制，避免重复命令调用
+# 修复版IP监控脚本 - 解决WiFi检测问题
 
 SCRIPT_DIR="$(dirname "$0")"
 DATA_DIR="$SCRIPT_DIR/data"
@@ -23,11 +23,15 @@ init_global_cache() {
     # 获取ifconfig输出（一次性）
     if command -v ifconfig >/dev/null 2>&1; then
         GLOBAL_IFCONFIG_OUTPUT=$(ifconfig 2>/dev/null)
+        echo "ifconfig输出长度: ${#GLOBAL_IFCONFIG_OUTPUT}" >&2
     fi
 
     # 获取WiFi信息（一次性）
     if command -v termux-wifi-connectioninfo >/dev/null 2>&1; then
         GLOBAL_WIFI_INFO=$(termux-wifi-connectioninfo 2>/dev/null)
+        echo "WiFi信息: $GLOBAL_WIFI_INFO" >&2
+    else
+        echo "termux-wifi-connectioninfo命令不可用" >&2
     fi
 
     # 获取公网IP（一次性）
@@ -80,7 +84,7 @@ is_hotspot_active() {
             # 还需要确认wlan0没有连接到外部WiFi
             # 检查termux-wifi-connectioninfo是否返回有效的WiFi信息
             if [ -n "$GLOBAL_WIFI_INFO" ]; then
-                local ssid=$(echo "$GLOBAL_WIFI_INFO" | grep -o '"ssid":"[^"]*"' | cut -d'"' -f4)
+                local ssid=$(echo "$GLOBAL_WIFI_INFO" | sed -n 's/.*"ssid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 
                 # 如果没有有效的WiFi连接，才认为是热点模式
                 if [ "$ssid" = "<unknown ssid>" ] || [ "$ssid" = "null" ] || [ -z "$ssid" ]; then
@@ -102,14 +106,17 @@ get_network_info() {
     local wifi_name="N/A"
 
     # 使用全局缓存
-    if [ -n "$GLOBAL_WIFI_INFO" ] && echo "$GLOBAL_WIFI_INFO" | grep -q '"ssid"'; then
+    if [ -n "$GLOBAL_WIFI_INFO" ]; then
         # 提取ssid值
-        wifi_name=$(echo "$GLOBAL_WIFI_INFO" | grep -o '"ssid":"[^"]*"' | cut -d'"' -f4)
+        local ssid=$(echo "$GLOBAL_WIFI_INFO" | sed -n 's/.*"ssid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+        echo "提取的WiFi SSID: '$ssid'" >&2
 
         # 判断是否为有效的WiFi连接
-        if [ "$wifi_name" != "<unknown ssid>" ] && [ "$wifi_name" != "null" ] && [ -n "$wifi_name" ]; then
+        if [ -n "$ssid" ] && [ "$ssid" != "<unknown ssid>" ] && [ "$ssid" != "null" ]; then
             # 有效的WiFi连接
             network_type="WiFi"
+            wifi_name="$ssid"
 
             # 检查是否同时开启了热点
             if is_hotspot_active; then
@@ -130,18 +137,18 @@ get_network_info() {
             fi
         fi
     else
-            # 没有ssid字段
-            wifi_name="Unknown_WiFi"
+        # 没有获取到WiFi信息
+        wifi_name="Unknown_WiFi"
 
-            # 检查是否开启了热点
-            if is_hotspot_active; then
-                # 移动网络 + 热点开启
-                network_type="Hotspot"
-                wifi_name="Hotspot_Mode"
-            else
-                # 纯移动网络
-                network_type="Mobile"
-            fi
+        # 检查是否开启了热点
+        if is_hotspot_active; then
+            # 移动网络 + 热点开启
+            network_type="Hotspot"
+            wifi_name="Hotspot_Mode"
+        else
+            # 纯移动网络
+            network_type="Mobile"
+        fi
     fi
 
     # 清理WiFi名称（确保统一格式）
@@ -259,13 +266,24 @@ has_changed() {
     # 只读取第一行（最新记录），减少IO
     local latest_line
     if read -r latest_line < "$LOG_FILE"; then
-        # 简化解析逻辑
-        local latest_network=$(echo "$latest_line" | cut -d'|' -f2 | cut -d':' -f2 | xargs)
-        local latest_wifi=$(echo "$latest_line" | cut -d'|' -f3 | cut -d':' -f2 | xargs)
-        local latest_public_ip=$(echo "$latest_line" | cut -d'|' -f4 | cut -d':' -f2 | xargs)
-        local latest_local_ip=$(echo "$latest_line" | cut -d'|' -f5 | cut -d':' -f2 | xargs)
-        local latest_vpn_iface=$(echo "$latest_line" | cut -d'|' -f6 | cut -d':' -f2 | xargs)
-        local latest_vpn_ip=$(echo "$latest_line" | cut -d'|' -f7 | cut -d':' -f2 | xargs)
+        echo "=== 解析最新日志记录 ===" >&2
+        echo "日志行: $latest_line" >&2
+
+        # 使用更健壮的解析方法
+        local latest_network=$(echo "$latest_line" | awk -F'[|]' '{print $2}' | awk -F':' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local latest_wifi=$(echo "$latest_line" | awk -F'[|]' '{print $3}' | awk -F':' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local latest_public_ip=$(echo "$latest_line" | awk -F'[|]' '{print $4}' | awk -F':' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local latest_local_ip=$(echo "$latest_line" | awk -F'[|]' '{print $5}' | awk -F':' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local latest_vpn_iface=$(echo "$latest_line" | awk -F'[|]' '{print $6}' | awk -F':' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local latest_vpn_ip=$(echo "$latest_line" | awk -F'[|]' '{print $7}' | awk -F':' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        echo "解析结果:" >&2
+        echo "latest_network: '$latest_network'" >&2
+        echo "latest_wifi: '$latest_wifi'" >&2
+        echo "latest_public_ip: '$latest_public_ip'" >&2
+        echo "latest_local_ip: '$latest_local_ip'" >&2
+        echo "latest_vpn_iface: '$latest_vpn_iface'" >&2
+        echo "latest_vpn_ip: '$latest_vpn_ip'" >&2
 
         # 比较所有字段
         if [ "$current_network" != "$latest_network" ] || \
@@ -274,10 +292,14 @@ has_changed() {
            [ "$current_local_ip" != "$latest_local_ip" ] || \
            [ "$current_vpn_iface" != "$latest_vpn_iface" ] || \
            [ "$current_vpn_ip" != "$latest_vpn_ip" ]; then
+            echo "检测到变化！" >&2
             return 0  # 有变化
+        else
+            echo "所有字段相同，无变化" >&2
         fi
     else
         # 文件为空或读取失败
+        echo "日志文件为空或读取失败" >&2
         return 0
     fi
 
@@ -317,6 +339,8 @@ write_log() {
 
 # 主函数
 main() {
+    echo "=== IP监控脚本开始运行 ===" >&2
+
     # 初始化全局缓存（一次性获取所有必要信息）
     init_global_cache
 
@@ -339,22 +363,35 @@ main() {
     vpn_interface=$(clean_field "$vpn_interface")
     vpn_ip=$(clean_field "$vpn_ip")
 
+    # 显示当前信息
+    echo "=== 当前网络信息 ===" >&2
+    echo "网络类型: $network_type" >&2
+    echo "WiFi名称: $wifi_name" >&2
+    echo "公网IP: $public_ip" >&2
+    echo "本地IP: $local_ip" >&2
+    echo "VPN接口: $vpn_interface" >&2
+    echo "VPN IP: $vpn_ip" >&2
+
     # 检查变化
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
     if has_changed "$network_type" "$wifi_name" "$public_ip" "$local_ip" "$vpn_interface" "$vpn_ip"; then
-        echo "检测到网络/IP变化，记录新信息:"
-        echo "时间: $timestamp"
-        echo "网络: $network_type, WiFi: $wifi_name"
-        echo "公网IP: $public_ip, 本地IP: $local_ip"
-        echo "VPN: $vpn_interface ($vpn_ip)"
+        echo "检测到网络/IP变化，记录新信息:" >&2
+        echo "时间: $timestamp" >&2
+        echo "网络: $network_type, WiFi: $wifi_name" >&2
+        echo "公网IP: $public_ip, 本地IP: $local_ip" >&2
+        echo "VPN: $vpn_interface ($vpn_ip)" >&2
 
         # 写入日志
         write_log "$timestamp" "$network_type" "$wifi_name" "$public_ip" "$local_ip" "$vpn_interface" "$vpn_ip"
+
+        echo "=== 记录已保存 ===" >&2
     else
-        echo "网络/IP未发生变化，跳过记录"
-        echo "当前: Network: $network_type, WiFi: $wifi_name, Public_IP: $public_ip, Local_IP: $local_ip, VPN: $vpn_interface ($vpn_ip)"
+        echo "网络/IP未发生变化，跳过记录" >&2
+        echo "当前: Network: $network_type, WiFi: $wifi_name, Public_IP: $public_ip, Local_IP: $local_ip, VPN: $vpn_interface ($vpn_ip)" >&2
     fi
+
+    echo "=== IP监控脚本运行结束 ===" >&2
 }
 
 # 启动脚本

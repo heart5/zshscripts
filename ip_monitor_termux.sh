@@ -69,6 +69,28 @@ clean_field() {
     echo "$1" | tr -d '\n\r\t' | sed 's/|/_/g' | head -c 100
 }
 
+# 检测是否连接到其他手机的热点
+is_hotspot_connection() {
+    # 使用全局缓存
+    if [ -n "$GLOBAL_WIFI_INFO" ] && [ -n "$GLOBAL_IFCONFIG_OUTPUT" ]; then
+        # 从WiFi信息中提取IP
+        local wifi_ip=$(echo "$GLOBAL_WIFI_INFO" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+        # 检查是否是热点IP段（192.168.43.x）
+        if echo "$wifi_ip" | grep -q '^192\.168\.43\.'; then
+            # 进一步确认：检查wlan0接口是否有相同的IP
+            local wlan0_ip=$(echo "$GLOBAL_IFCONFIG_OUTPUT" | grep -A2 '^wlan0:' | grep 'inet ' | awk '{print $2}' | head -1)
+
+            if [ "$wifi_ip" = "$wlan0_ip" ]; then
+                # 确认是连接到热点
+                return 0  # 是热点连接
+            fi
+        fi
+    fi
+
+    return 1  # 不是热点连接
+}
+
 # 检测是否开启了热点（使用全局缓存）
 is_hotspot_active() {
     # 使用全局缓存
@@ -118,10 +140,18 @@ get_network_info() {
             network_type="WiFi"
             wifi_name="$ssid"
 
-            # 检查是否同时开启了热点
-            if is_hotspot_active; then
-                # WiFi连接 + 热点开启
-                wifi_name="${wifi_name}_Hotspot"
+            # 检查是否是热点连接（通过IP判断）
+            if is_hotspot_connection; then
+                # 连接到其他手机的热点
+                network_type="Hotspot_Client"
+                wifi_name="${wifi_name}_HotspotClient"
+            else
+                # 真正的WiFi连接
+                # 检查是否同时开启了热点
+                if is_hotspot_active; then
+                    # WiFi连接 + 热点开启
+                    wifi_name="${wifi_name}_Hotspot"
+                fi
             fi
         else
             wifi_name="Unknown_WiFi"
@@ -167,7 +197,7 @@ get_local_ip() {
         # 根据网络类型获取对应的IP
         case "$network_type" in
             "WiFi")
-                # WiFi连接：获取外部WiFi的IP
+                # 真正的WiFi连接：获取外部WiFi的IP
                 # 查找wlan接口，排除热点IP（192.168.43.x）
                 ip=$(echo "$GLOBAL_IFCONFIG_OUTPUT" | grep -A2 '^wlan' | grep 'inet ' | awk '{print $2}' | head -1)
 
@@ -177,8 +207,21 @@ get_local_ip() {
                 fi
                 ;;
 
+            "Hotspot_Client")
+                # 连接到其他手机的热点：获取热点分配的IP
+                # 从WiFi信息中提取IP
+                if [ -n "$GLOBAL_WIFI_INFO" ]; then
+                    ip=$(echo "$GLOBAL_WIFI_INFO" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                fi
+
+                # 如果提取失败，从wlan0获取
+                if [ -z "$ip" ] || [ "$ip" = "N/A" ]; then
+                    ip=$(echo "$GLOBAL_IFCONFIG_OUTPUT" | grep -A2 '^wlan0:' | grep 'inet ' | awk '{print $2}' | head -1)
+                fi
+                ;;
+
             "Hotspot")
-                # 热点模式：获取热点IP
+                # 热点模式：获取热点IP（本机开启热点）
                 # 优先获取p2p-p2p0-0接口的IP
                 ip=$(echo "$GLOBAL_IFCONFIG_OUTPUT" | grep -A2 '^p2p-p2p0-0:' | grep 'inet ' | awk '{print $2}' | head -1)
 

@@ -12,6 +12,9 @@
 #   2026-10-09 12:00:00 | Network: X | WiFi_Name: X | Public_IP: X | Local_IP: X | VPN_Interface: X | VPN_IP: X
 # WiFi_Name 归一：无 WiFi / SSID 取不到一律 Unknown_WiFi（报告端归一为未命名、不进热点列表；
 #   勿写 N/A——WSL 旧版曾如此，热点列表会混入「N/A」）
+# SSID 抗抖动（termux 分支专用；wsl/linux 失败模式为纯空输出、无此抖动未启用）：重试面覆盖
+#   rc=0 但 ssid=<unknown ssid> 的脱敏输出；仍失败且与最新记录同连接（Network+Local_IP 双符）时
+#   粘滞携带其已知 SSID——防止「未知↔真名」交替写行被报告端误判为网络变化
 # 行为：与最新记录（首行）完全相同则跳过；新记录置最前；上限 9000 行；原子替换（tmp+mv）
 # 运行：cron 非 tty 完全静默；tty 诊断走 stderr；-t 只打印当前状态（stdout）不写日志
 #   Termux 无 /usr/bin/env —— Termux 上勿直接 ./ip_monitor.sh，用 `bash ip_monitor.sh`
@@ -80,6 +83,22 @@ has_changed() {
     [ "$latest_rest" != "$current" ]
 }
 
+# SSID 粘滞携带：探测失败时，若最新记录与当前连接一致（Network+Local_IP 双符）且其 WiFi 名已知，
+# 沿用之——避免「未知↔真名」交替写行；不符则输出空（调用方保持 Unknown_WiFi）
+carry_prev_ssid() {
+    local want_net="$1" want_ip="$2" latest_line ssid
+    [ -n "$want_ip" ] && [ -f "$LOG_FILE" ] || return 0
+    read -r latest_line < "$LOG_FILE" || return 0
+    [ -z "$latest_line" ] && return 0
+    case "$latest_line" in
+        *"| Network: $want_net |"*"| Local_IP: $want_ip |"*) ;;
+        *) return 0 ;;
+    esac
+    ssid=$(printf '%s' "$latest_line" | sed -n 's/.*| WiFi_Name: \([^|]*\) |.*/\1/p')
+    case "$ssid" in ""|"Unknown_WiFi"|"N/A") return 0 ;; esac
+    printf '%s' "$ssid"
+}
+
 # 追加记录（新记录最前，原子替换；权限对齐 hc 的 600）
 write_log() {
     local log_line="$1"
@@ -112,16 +131,27 @@ T_WIFI_INFO=""
 T_PUBLIC_IP=""
 T_WIFI_PROBE_NOTE=""
 
+# SSID 提取（探测失败型输出 <unknown ssid>/null/空 一律输出空；供重试判定、类型判定、热点判定共用）
+t_probe_ssid() {
+    local ssid=""
+    if [ -n "$T_WIFI_INFO" ]; then
+        ssid=$(printf '%s' "$T_WIFI_INFO" | sed -n 's/.*"ssid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    fi
+    case "$ssid" in ""|"null"|"<unknown ssid>") return 0 ;; esac
+    printf '%s' "$ssid"
+}
+
 t_init_cache() {
     if command -v ifconfig >/dev/null 2>&1; then
         T_IFCONFIG=$(timeout 5 ifconfig 2>/dev/null)
     fi
 
     # WiFi 信息（一次性；后台冻结下 termux-api 响应可能迟到超过 5s，疑似已连 WiFi 时重试一次）
+    # 重试面覆盖「非空但 SSID 为 <unknown ssid>」——rc=0 的位置脱敏输出亦属探测失败
     if command -v termux-wifi-connectioninfo >/dev/null 2>&1; then
         T_WIFI_INFO=$(timeout 5 termux-wifi-connectioninfo 2>/dev/null)
         T_WIFI_PROBE_NOTE="rc1=$?"
-        if [ -z "$T_WIFI_INFO" ] && [ -n "$(t_wlan0_external_ip)" ]; then
+        if [ -z "$(t_probe_ssid)" ] && [ -n "$(t_wlan0_external_ip)" ]; then
             sleep 2
             T_WIFI_INFO=$(timeout 7 termux-wifi-connectioninfo 2>/dev/null)
             T_WIFI_PROBE_NOTE="$T_WIFI_PROBE_NOTE rc2=$?"
@@ -179,16 +209,11 @@ t_is_hotspot_active() {
         local wlan0_ip
         wlan0_ip=$(printf '%s' "$T_IFCONFIG" | grep -A2 '^wlan0:' | grep 'inet ' | awk '{print $2}' | head -1)
         if printf '%s' "$wlan0_ip" | grep -q '^192\.168\.43\.1$'; then
-            if [ -n "$T_WIFI_INFO" ]; then
-                local ssid
-                ssid=$(printf '%s' "$T_WIFI_INFO" | sed -n 's/.*"ssid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-                if [ "$ssid" = "<unknown ssid>" ] || [ "$ssid" = "null" ] || [ -z "$ssid" ]; then
-                    return 0
-                fi
-            else
+            if [ -z "$T_WIFI_INFO" ]; then
                 # 命令不可用，假设是热点
                 return 0
             fi
+            [ -z "$(t_probe_ssid)" ] && return 0
         fi
     fi
     return 1
@@ -222,11 +247,13 @@ t_get_network_info() {
         # SSID 未取到（API 超时/未知/Location 关闭）：若 wlan0 已持外部地址，
         # 说明 WiFi 实际已连接、仅识别失败，按 WiFi 记录（SSID 未知），避免误判为 Mobile
         wifi_name="Unknown_WiFi"
-        local wlan_ip
+        local wlan_ip carried
         wlan_ip=$(t_wlan0_external_ip)
         if [ -n "$wlan_ip" ]; then
             network_type="WiFi"
             t_log_wifi_anomaly "$wlan_ip"
+            carried=$(carry_prev_ssid "WiFi" "$wlan_ip")
+            [ -n "$carried" ] && wifi_name="$carried"
         elif t_is_hotspot_active; then
             # 移动网络 + 热点开启
             network_type="Hotspot"

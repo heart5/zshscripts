@@ -21,7 +21,8 @@
 # SSID/BSSID 抗抖动（termux 分支专用；wsl/linux 失败模式为纯空输出、无此抖动未启用）：重试面覆盖
 #   rc=0 但 ssid=<unknown ssid> 的脱敏输出；仍失败且与最新记录同连接（Network+Local_IP 双符）时
 #   粘滞携带其已知值——防止「未知↔真值」交替写行被报告端误判为网络变化
-# 行为：与最新记录（首行）完全相同则跳过；新记录置最前；上限 9000 行；原子替换（tmp+mv）
+# 行为：与最新记录（首行）核心字段相同则跳过（Source/BSSID 仅展示、不参与去重）；
+#   新记录置最前；上限 9000 行；原子替换（tmp+mv）
 # 运行：cron 非 tty 完全静默；tty 诊断走 stderr；-t 只打印当前状态（stdout）不写日志
 #   Termux 无 /usr/bin/env —— Termux 上勿直接 ./ip_monitor.sh，用 `bash ip_monitor.sh`
 #   （各机 wrapper 与兼容垫片均已显式 bash 调用）
@@ -171,14 +172,19 @@ set_cn_public_ip() {
     return 1
 }
 
-# 与最新记录比对（忽略时间戳，六字段整串比较）
+# 去重比较键：剔除仅展示字段（Source/BSSID）——端点切换、AP 漫游不写新行
+_change_key() {
+    printf '%s' "$1" | sed -E 's/ \| Public_IP_Source: [^|]*//; s/ \| WiFi_BSSID: [^|]*//'
+}
+
+# 与最新记录比对（忽略时间戳与展示字段，核心字段整串比较）
 has_changed() {
     local current="$1" latest_line latest_rest
     [ ! -f "$LOG_FILE" ] && return 0
     read -r latest_line < "$LOG_FILE" || return 0
     [ -z "$latest_line" ] && return 0
     latest_rest=$(printf '%s' "$latest_line" | sed -E 's/^[^|]+\| //')
-    [ "$latest_rest" != "$current" ]
+    [ "$(_change_key "$latest_rest")" != "$(_change_key "$current")" ]
 }
 
 # SSID 粘滞携带：探测失败时，若最新记录与当前连接一致（Network+Local_IP 双符）且其 WiFi 名已知，

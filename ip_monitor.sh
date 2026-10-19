@@ -8,20 +8,26 @@
 #   linux ：其余（恒创云等常规服务器）
 # 输出：<脚本目录>/data/ip_changes.log（IP_LOG_FILE 可覆盖）
 #       —— 各机云端配置 [happyjpip] 的 <device_id>_ip_log 与此路径对应，默认勿动
-# 格式（报告端 ipupdate.py 按此解析，冻结勿改）：
-#   2026-10-09 12:00:00 | Network: X | WiFi_Name: X | Public_IP: X | Local_IP: X | VPN_Interface: X | VPN_IP: X
+# 格式（报告端 ipupdate.py 按此宽松键值解析）：
+#   2026-10-09 12:00:00 | Network: X | WiFi_Name: X | Public_IP: X | Local_IP: X | VPN_Interface: X | VPN_IP: X | Public_IP_Source: X | Public_IP_CN: X | WiFi_BSSID: X
+#   —— 旧 7 字段行仍可被报告端解析；新增三字段顺序固定追加在行尾
+# Public_IP = 国际出口（按端点表顺序逐个尝试，首个成功即停）；Public_IP_Source 为命中端点 token
+#   （ipsb/icanhazip/aws-checkip/ipinfo/ifconfig/hcx-echo/unknown）
+# Public_IP_CN = 国内出口（https://ip.3322.net），失败 Unknown——手机分流网络下与国际出口不同
+# WiFi_BSSID = 小写冒号 MAC；非 WiFi 连接 N/A；WiFi 取不到 Unknown
+# 端点表：5 个国际端点 + HCX 自建回声兜底；回声须 --resolve 直连源站（经 CF 会得到 CF 边缘 IP）
 # WiFi_Name 归一：无 WiFi / SSID 取不到一律 Unknown_WiFi（报告端归一为未命名、不进热点列表；
 #   勿写 N/A——WSL 旧版曾如此，热点列表会混入「N/A」）
-# SSID 抗抖动（termux 分支专用；wsl/linux 失败模式为纯空输出、无此抖动未启用）：重试面覆盖
+# SSID/BSSID 抗抖动（termux 分支专用；wsl/linux 失败模式为纯空输出、无此抖动未启用）：重试面覆盖
 #   rc=0 但 ssid=<unknown ssid> 的脱敏输出；仍失败且与最新记录同连接（Network+Local_IP 双符）时
-#   粘滞携带其已知 SSID——防止「未知↔真名」交替写行被报告端误判为网络变化
+#   粘滞携带其已知值——防止「未知↔真值」交替写行被报告端误判为网络变化
 # 行为：与最新记录（首行）完全相同则跳过；新记录置最前；上限 9000 行；原子替换（tmp+mv）
 # 运行：cron 非 tty 完全静默；tty 诊断走 stderr；-t 只打印当前状态（stdout）不写日志
 #   Termux 无 /usr/bin/env —— Termux 上勿直接 ./ip_monitor.sh，用 `bash ip_monitor.sh`
 #   （各机 wrapper 与兼容垫片均已显式 bash 调用）
 # 超时预算：cron wrapper（cronpy/ip_monitor.sh）整体 timeout 40s；termux 分支最坏
-#   ≈ 5s(ifconfig) + 5s+2s+7s(SSID 探测+重试) + 5s+3s(公网 IP) ≈ 27s，故 termux 公网 IP
-#   用短预算版（勿共用 3 端点长预算版）
+#   ≈ 5s(ifconfig) + 5s+2s+7s(SSID 探测+重试) + 6×2s(国际端点) + 2s(国内端点) ≈ 33s；
+#   长预算分支（wsl/linux，逐次 timeout 4s）≈ 6×4s + 4s ≈ 28s
 # VPN 探测差异（按分支保留，均为刻意设计）：termux/wsl 含 wg（客户端语义）；linux 仅
 #   tun/tap/ppp——本机自身 WireGuard 服务端接口（如 HCX wg0）不代表流量经 VPN 出口，不计入
 # 兼容：同目录 ip_monitor_termux.sh / ip_monitor_wsl.sh / ip_monitor_linux.sh 为转发垫片
@@ -34,13 +40,28 @@ LOG_FILE="${IP_LOG_FILE:-$SCRIPT_DIR/data/ip_changes.log}"
 TEMP_FILE="${LOG_FILE}.tmp"
 MAX_LOG_LINES=9000
 
-# run_* 填充这六个字段，main 统一清理/成行
+# run_* 填充这九个字段，main 统一清理/成行
 NET_TYPE="Unknown"
 WIFI_NAME="Unknown_WiFi"
 PUBLIC_IP="Unknown"
 LOCAL_IP="N/A"
 VPN_IFACE="N/A"
 VPN_IP="N/A"
+PUBLIC_IP_SOURCE="unknown"
+PUBLIC_IP_CN="Unknown"
+WIFI_BSSID="N/A"
+
+# 国际出口端点表：url|token|--resolve 参数（空=普通 DNS）。按序尝试、首个有效即停
+PUBLIC_IP_ENDPOINTS=(
+    "https://api.ip.sb/ip|ipsb|"
+    "https://ipv4.icanhazip.com|icanhazip|"
+    "https://checkip.amazonaws.com|aws-checkip|"
+    "https://ipinfo.io/ip|ipinfo|"
+    "https://ifconfig.me/ip|ifconfig|"
+    "https://xilong9.com/ip.php|hcx-echo|xilong9.com:443:149.30.242.156"
+)
+# 国内出口端点（独立字段，不参与国际端点轮询）
+CN_IP_ENDPOINTS=("https://ip.3322.net")
 
 # ---- 公共函数 ----
 
@@ -48,29 +69,106 @@ clean_field() {
     printf '%s' "$1" | tr -d '\n\r\t' | sed 's/|/_/g' | head -c 100
 }
 
-# 公网 IP·短预算版（termux；wrapper 40s 内）—— -4 强制 IPv4，避免双栈下取回 IPv6
-get_public_ip_short() {
-    local ip
-    ip=$(curl -4 -s --max-time 5 --retry 1 https://api.ipify.org 2>/dev/null | tr -d '\r\n')
-    if ! printf '%s' "$ip" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
-        ip=$(curl -4 -s --max-time 3 --retry 1 https://ifconfig.me 2>/dev/null | tr -d '\r\n')
-    fi
-    if printf '%s' "$ip" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
-        printf '%s' "$ip"; return
-    fi
-    printf 'Unknown'
+# 严格公网 IPv4 判定：四段 0-255、无前导零、首段 1-223，排除私网/保留/文档/CGNAT 等段
+_is_public_ipv4() {
+    printf '%s' "$1" | awk -F. '
+        NF != 4 { exit 1 }
+        {
+            for (i = 1; i <= 4; i++) {
+                if ($i !~ /^[0-9]+$/ || length($i) > 3) exit 1
+                if ($i ~ /^0[0-9]/) exit 1
+                v[i] = $i + 0
+                if (v[i] > 255) exit 1
+            }
+            if (v[1] < 1 || v[1] > 223) exit 1
+            if (v[1] == 10) exit 1
+            if (v[1] == 127) exit 1
+            if (v[1] == 169 && v[2] == 254) exit 1
+            if (v[1] == 172 && v[2] >= 16 && v[2] <= 31) exit 1
+            if (v[1] == 192 && v[2] == 168) exit 1
+            if (v[1] == 100 && v[2] >= 64 && v[2] <= 127) exit 1
+            if (v[1] == 198 && (v[2] == 18 || v[2] == 19)) exit 1
+            if (v[1] == 192 && v[2] == 0 && (v[3] == 0 || v[3] == 2)) exit 1
+            if (v[1] == 198 && v[2] == 51 && v[3] == 100) exit 1
+            if (v[1] == 203 && v[2] == 0 && v[3] == 113) exit 1
+            if (v[1] == 192 && v[2] == 88 && v[3] == 99) exit 1
+        }' 2>/dev/null
 }
 
-# 公网 IP·3 端点轮询版（wsl/linux；实测部分网络屏蔽 ipify/ifconfig.me，返回空即换下一个）
-get_public_ip_long() {
-    local ip url
-    for url in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipinfo.io/ip"; do
-        ip=$(timeout 12 curl -4 -s --max-time 8 "$url" 2>/dev/null | tr -d '\r\n')
-        if printf '%s' "$ip" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
-            printf '%s' "$ip"; return
+# 从响应体提取公网 IPv4：优先首行整串严格校验；失败再取第一个以非 [0-9.] 为边界的候选
+# （不 tr -d '\r\n'，避免两行拼接；1.2.3.4.5 不会被截成 1.2.3.4）
+_extract_public_ipv4() {
+    local body line candidate
+    body=$(printf '%s' "$1" | head -c 512)
+    line=$(printf '%s\n' "$body" | head -1 | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    if _is_public_ipv4 "$line"; then
+        printf '%s' "$line"
+        return 0
+    fi
+    candidate=$(printf '%s\n' "$line" | grep -oE '(^|[^0-9.])([0-9]{1,3}(\.[0-9]{1,3}){3})([^0-9.]|$)' | head -1 | sed -E 's/^[^0-9]*//; s/[^0-9]*$//')
+    if _is_public_ipv4 "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+# 轮询国际端点，设置 PUBLIC_IP / PUBLIC_IP_SOURCE；全部失败 Unknown/unknown
+# 参数：max_time（单次 curl 上限）、可选 wrap=逐次外层 timeout(N+1)；-f 且检查 rc，非零不采信
+set_public_ip() {
+    local max_time="$1"
+    local wrap="${2:-}"
+    local entry url token resolve ip rc
+    local -a curl_args
+    PUBLIC_IP="Unknown"
+    PUBLIC_IP_SOURCE="unknown"
+    for entry in "${PUBLIC_IP_ENDPOINTS[@]}"; do
+        IFS='|' read -r url token resolve <<< "$entry"
+        [ "$token" = "hcx-echo" ] && url="${url}?t=$(date +%s)"
+        curl_args=(-4 -fsS --connect-timeout 2 --max-time "$max_time")
+        [ -n "$resolve" ] && curl_args+=(--resolve "$resolve")
+        if [ -n "$wrap" ]; then
+            ip=$(timeout $((max_time + 1)) curl "${curl_args[@]}" "$url" 2>/dev/null)
+        else
+            ip=$(curl "${curl_args[@]}" "$url" 2>/dev/null)
         fi
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            ip=$(_extract_public_ipv4 "$ip")
+            if [ -n "$ip" ]; then
+                PUBLIC_IP="$ip"
+                PUBLIC_IP_SOURCE="$token"
+                return 0
+            fi
+        fi
+        [ -t 2 ] && echo "[ip_monitor] 国际端点失败: $token (rc=$rc)" >&2
     done
-    printf 'Unknown'
+    return 1
+}
+
+# 探测国内出口，设置 PUBLIC_IP_CN；失败 Unknown（不参与国际端点轮询）
+set_cn_public_ip() {
+    local max_time="$1"
+    local wrap="${2:-}"
+    local url ip rc
+    PUBLIC_IP_CN="Unknown"
+    for url in "${CN_IP_ENDPOINTS[@]}"; do
+        if [ -n "$wrap" ]; then
+            ip=$(timeout $((max_time + 1)) curl -4 -fsS --connect-timeout 2 --max-time "$max_time" "$url" 2>/dev/null)
+        else
+            ip=$(curl -4 -fsS --connect-timeout 2 --max-time "$max_time" "$url" 2>/dev/null)
+        fi
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            ip=$(_extract_public_ipv4 "$ip")
+            if [ -n "$ip" ]; then
+                PUBLIC_IP_CN="$ip"
+                return 0
+            fi
+        fi
+        [ -t 2 ] && echo "[ip_monitor] 国内端点失败: $url (rc=$rc)" >&2
+    done
+    return 1
 }
 
 # 与最新记录比对（忽略时间戳，六字段整串比较）
@@ -97,6 +195,21 @@ carry_prev_ssid() {
     ssid=$(printf '%s' "$latest_line" | sed -n 's/.*| WiFi_Name: \([^|]*\) |.*/\1/p')
     case "$ssid" in ""|"Unknown_WiFi"|"N/A") return 0 ;; esac
     printf '%s' "$ssid"
+}
+
+# BSSID 粘滞携带：条件同 SSID（最新记录与当前连接 Network+Local_IP 双符），值取行尾 WiFi_BSSID
+carry_prev_bssid() {
+    local want_net="$1" want_ip="$2" latest_line bssid
+    [ -n "$want_ip" ] && [ "$want_ip" != "N/A" ] && [ -f "$LOG_FILE" ] || return 0
+    read -r latest_line < "$LOG_FILE" || return 0
+    [ -z "$latest_line" ] && return 0
+    case "$latest_line" in
+        *"| Network: $want_net |"*"| Local_IP: $want_ip |"*) ;;
+        *) return 0 ;;
+    esac
+    bssid=$(printf '%s' "$latest_line" | sed -n 's/.*| WiFi_BSSID: \([^|]*\)[[:space:]]*$/\1/p')
+    case "$bssid" in ""|"Unknown"|"unknown"|"N/A") return 0 ;; esac
+    printf '%s' "$bssid"
 }
 
 # 追加记录（新记录最前，原子替换；权限对齐 hc 的 600）
@@ -141,6 +254,17 @@ t_probe_ssid() {
     printf '%s' "$ssid"
 }
 
+# BSSID 提取：小写；null/全零/空一律输出空（全零是 Android 脱敏值）
+t_probe_bssid() {
+    local bssid=""
+    if [ -n "$T_WIFI_INFO" ]; then
+        bssid=$(printf '%s' "$T_WIFI_INFO" | sed -n 's/.*"bssid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    fi
+    bssid=$(printf '%s' "$bssid" | tr 'A-F' 'a-f')
+    case "$bssid" in ""|"null"|"02:00:00:00:00:00") return 0 ;; esac
+    printf '%s' "$bssid"
+}
+
 t_init_cache() {
     if command -v ifconfig >/dev/null 2>&1; then
         T_IFCONFIG=$(timeout 5 ifconfig 2>/dev/null)
@@ -160,7 +284,8 @@ t_init_cache() {
         T_WIFI_PROBE_NOTE="命令不可用"
     fi
 
-    T_PUBLIC_IP=$(get_public_ip_short)
+    set_public_ip 2
+    T_PUBLIC_IP=$PUBLIC_IP
 }
 
 # 提取 wlan0 持有的外部地址（排除热点段 192.168.43.x；无则输出空）
@@ -345,6 +470,22 @@ t_get_vpn_info() {
     printf '%s|%s' "$vpn_interface" "$vpn_ip"
 }
 
+# BSSID：仅 WiFi/Hotspot_Client 有意义；取不到时同连接粘滞携带已知值，最终兜底 Unknown
+t_get_bssid() {
+    local network_type="$1"
+    local local_ip="$2"
+    local bssid
+    case "$network_type" in
+        WiFi|Hotspot_Client) ;;
+        *) printf 'N/A'; return ;;
+    esac
+    bssid=$(t_probe_bssid)
+    if [ -z "$bssid" ]; then
+        bssid=$(carry_prev_bssid "$network_type" "$local_ip")
+    fi
+    printf '%s' "${bssid:-Unknown}"
+}
+
 run_termux() {
     t_init_cache
     local info vpn
@@ -353,6 +494,7 @@ run_termux() {
     WIFI_NAME=${info#*|}
     PUBLIC_IP=$T_PUBLIC_IP
     LOCAL_IP=$(t_get_local_ip "$NET_TYPE")
+    WIFI_BSSID=$(t_get_bssid "$NET_TYPE" "$LOCAL_IP")
     vpn=$(t_get_vpn_info)
     VPN_IFACE=${vpn%%|*}
     VPN_IP=${vpn#*|}
@@ -366,6 +508,7 @@ W_NETSH=""
 W_PS=""
 W_WIN_VPN_NAME=""
 W_WIN_VPN_IP=""
+W_WLAN_INFO=""
 
 # netsh 中文输出是 GBK 字节：若非合法 UTF-8，按 GBK 转回（转换失败则原样返回）
 w_fix_encoding() {
@@ -390,14 +533,32 @@ if (\$v) { \$vip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex \$v.ifI
 \"\$(\$a.Name)|\$(\$a.InterfaceDescription)|\$ip|\$(\$v.Name)|\$vip\"" 2>/dev/null | tr -d '\r' | head -1
 }
 
+# netsh wlan 输出缓存（SSID 与 BSSID 共用，避免重复启动 netsh）
+w_get_wlan_info() {
+    [ -n "$W_NETSH" ] || return 0
+    if [ -z "$W_WLAN_INFO" ]; then
+        W_WLAN_INFO=$(timeout 15 "$W_NETSH" wlan show interfaces 2>/dev/null | tr -d '\r')
+    fi
+    printf '%s' "$W_WLAN_INFO"
+}
+
 # 当前连接的 WiFi SSID（未连接/无网卡时输出为空；BSSID 行不会误匹配）
 w_get_ssid() {
     [ -n "$W_NETSH" ] || return 0
     local ssid
-    ssid=$(timeout 15 "$W_NETSH" wlan show interfaces 2>/dev/null | tr -d '\r' \
-        | grep -E '^[[:space:]]*SSID[[:space:]]*:' | head -1 \
+    ssid=$(w_get_wlan_info | grep -E '^[[:space:]]*SSID[[:space:]]*:' | head -1 \
         | sed -E 's/^[[:space:]]*SSID[[:space:]]*:[[:space:]]*//')
     w_fix_encoding "$ssid"
+}
+
+# 当前连接的 WiFi BSSID（小写冒号 MAC；不依赖本地化标签，优先 BSSID 行，兜底首个 MAC）
+w_get_bssid() {
+    [ -n "$W_NETSH" ] || return 0
+    local out mac
+    out=$(w_get_wlan_info)
+    mac=$(printf '%s\n' "$out" | grep -i 'BSSID' | grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' | head -1)
+    [ -z "$mac" ] && mac=$(printf '%s\n' "$out" | grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' | head -1)
+    printf '%s' "$mac" | tr 'A-F' 'a-f'
 }
 
 # 本地 IP：优先 Windows 主机 IP（真实局域网地址；WSL 为 NAT，172.x 无意义），取不到再退回 WSL 出口
@@ -452,7 +613,15 @@ run_wsl() {
         else NET_TYPE="Ethernet"; WIFI_NAME="Unknown_WiFi"; fi
     fi
 
-    PUBLIC_IP=$(get_public_ip_long)
+    if [ "$NET_TYPE" = "WiFi" ]; then
+        local wlan_bssid
+        wlan_bssid=$(w_get_bssid)
+        WIFI_BSSID="${wlan_bssid:-Unknown}"
+    else
+        WIFI_BSSID="N/A"
+    fi
+
+    set_public_ip 3 wrap
     LOCAL_IP=$(w_get_local_ip "$host_ip")
     vpn=$(w_get_vpn_info)
     VPN_IFACE=${vpn%%|*}
@@ -485,6 +654,19 @@ l_get_ssid() {
     printf '%s' "$ssid"
 }
 
+# WiFi BSSID：iw link 的 Connected to <MAC> 优先，iwgetid --bssid 兜底；输出小写
+l_get_bssid() {
+    local dev="$1" bssid=""
+    if command -v iw >/dev/null 2>&1; then
+        bssid=$(timeout 5 iw dev "$dev" link 2>/dev/null \
+            | sed -n 's/^[[:space:]]*Connected to \([0-9a-fA-F:]*\).*/\1/p' | head -1)
+    fi
+    if [ -z "$bssid" ] && command -v iwgetid >/dev/null 2>&1; then
+        bssid=$(timeout 5 iwgetid --bssid "$dev" 2>/dev/null | awk '{print $NF}')
+    fi
+    printf '%s' "$bssid" | tr 'A-F' 'a-f'
+}
+
 # VPN：仅 tun/tap/ppp——本机自身 WireGuard 服务端接口（wg0）不代表流量经 VPN 出口，不计入
 l_get_vpn_info() {
     local iface vip
@@ -509,10 +691,15 @@ run_linux() {
     ssid=""
     if [ "$NET_TYPE" = "WiFi" ]; then
         ssid=$(clean_field "$(l_get_ssid "$dev")")
+        local bssid
+        bssid=$(l_get_bssid "$dev")
+        WIFI_BSSID="${bssid:-Unknown}"
+    else
+        WIFI_BSSID="N/A"
     fi
     WIFI_NAME="${ssid:-Unknown_WiFi}"
 
-    PUBLIC_IP=$(get_public_ip_long)
+    set_public_ip 3 wrap
     LOCAL_IP=$(l_default_src_ip)
     vpn=$(l_get_vpn_info)
     VPN_IFACE=${vpn%%|*}
@@ -536,6 +723,12 @@ main() {
         *)      echo "[ip_monitor] 未知分支: $env_name（IP_MONITOR_FORCE 只接受 termux|wsl|linux）" >&2; return 2 ;;
     esac
 
+    # 国内出口与国际出口分别探测（短预算无外层 timeout；长预算逐次 timeout）
+    case "$env_name" in
+        termux) set_cn_public_ip 2 ;;
+        *)      set_cn_public_ip 3 wrap ;;
+    esac
+
     # 字段清理与兜底归一（各分支产出后统一把关）
     NET_TYPE=$(clean_field "$NET_TYPE")
     WIFI_NAME=$(clean_field "$WIFI_NAME")
@@ -543,15 +736,21 @@ main() {
     LOCAL_IP=$(clean_field "$LOCAL_IP")
     VPN_IFACE=$(clean_field "$VPN_IFACE")
     VPN_IP=$(clean_field "$VPN_IP")
+    PUBLIC_IP_SOURCE=$(clean_field "$PUBLIC_IP_SOURCE")
+    PUBLIC_IP_CN=$(clean_field "$PUBLIC_IP_CN")
+    WIFI_BSSID=$(clean_field "$WIFI_BSSID")
     [ -z "$PUBLIC_IP" ] && PUBLIC_IP="Unknown"
     [ -z "$LOCAL_IP" ] && LOCAL_IP="N/A"
     [ -z "$WIFI_NAME" ] && WIFI_NAME="Unknown_WiFi"
     [ -z "$VPN_IFACE" ] && VPN_IFACE="N/A"
     [ -z "$VPN_IP" ] && VPN_IP="N/A"
+    [ -z "$PUBLIC_IP_SOURCE" ] && PUBLIC_IP_SOURCE="unknown"
+    [ -z "$PUBLIC_IP_CN" ] && PUBLIC_IP_CN="Unknown"
+    [ -z "$WIFI_BSSID" ] && WIFI_BSSID="N/A"
 
     local timestamp current full
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    current="Network: $NET_TYPE | WiFi_Name: $WIFI_NAME | Public_IP: $PUBLIC_IP | Local_IP: $LOCAL_IP | VPN_Interface: $VPN_IFACE | VPN_IP: $VPN_IP"
+    current="Network: $NET_TYPE | WiFi_Name: $WIFI_NAME | Public_IP: $PUBLIC_IP | Local_IP: $LOCAL_IP | VPN_Interface: $VPN_IFACE | VPN_IP: $VPN_IP | Public_IP_Source: $PUBLIC_IP_SOURCE | Public_IP_CN: $PUBLIC_IP_CN | WiFi_BSSID: $WIFI_BSSID"
     full="$timestamp | $current"
 
     if [ "$dry_run" = 1 ]; then
